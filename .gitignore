@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.private.json
+*.secret.json
+private/
+originals/
+node_modules/
+*.log
