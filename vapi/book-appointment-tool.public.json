@@ -1,0 +1,79 @@
+{
+  "version": {
+    "version": "v4",
+    "createdAt": "2026-09-11T11:58:29.526Z"
+  },
+  "tool": {
+    "function": {
+      "name": "reservar_cita",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "clientName",
+          "clientEmail",
+          "businessName",
+          "service",
+          "projectSummary",
+          "date",
+          "startTime"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "The confirmed appointment date in YYYY-MM-DD format using the Europe/Madrid timezone. It must match a date previously checked with consultar_disponibilidad."
+          },
+          "service": {
+            "type": "string",
+            "description": "The NovaWeb Studio service the caller is interested in, such as business automation, website development, CRM integration, lead follow-up automation or an AI voice agent."
+          },
+          "startTime": {
+            "type": "string",
+            "description": "The confirmed appointment start time in 24-hour HH:MM format using the Europe/Madrid timezone. It must exactly match one of the available slots returned by consultar_disponibilidad."
+          },
+          "clientName": {
+            "type": "string",
+            "description": "The caller's confirmed full name."
+          },
+          "clientEmail": {
+            "type": "string",
+            "description": "The caller's confirmed email address. It must be the exact address confirmed during the conversation."
+          },
+          "businessName": {
+            "type": "string",
+            "description": "The name of the caller's business or professional activity."
+          },
+          "projectSummary": {
+            "type": "string",
+            "description": "A concise one-sentence summary of the caller's main problem or objective."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Creates a 30-minute discovery meeting in the business Google Calendar after the caller has explicitly confirmed the booking. Use this tool only after consultar_disponibilidad has returned an available slot, the caller has selected one of those exact slots, and the assistant has confirmed the caller's name, email, business, date and time. Never use this tool to check availability. Never invent or modify the selected date or time."
+    },
+    "messages": [
+      {
+        "type": "request-start",
+        "content": "Perfecto, voy a comprobar de nuevo el horario y confirmar la reserva.",
+        "blocking": false
+      },
+      {
+        "type": "request-failed",
+        "content": "Lo siento, no he podido completar la reserva en este momento.",
+        "endCallAfterSpokenEnabled": false
+      }
+    ],
+    "server": {
+      "url": "YOUR_N8N_BOOK_APPOINTMENT_WEBHOOK_URL",
+      "timeoutSeconds": 30,
+      "staticIpAddressesEnabled": false
+    },
+    "variableExtractionPlan": {
+      "schema": {
+        "type": "object",
+        "required": [],
+        "properties": {}
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "version": {
+    "version": "v6",
+    "createdAt": "2026-09-11T09:45:52.446Z"
+  },
+  "tool": {
+    "function": {
+      "name": "consultar_disponibilidad",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "date",
+          "timePreference"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "Requested date in YYYY-MM-DD format, interpreted in the Europe/Madrid timezone. Resolve relative expressions such as tomorrow or next Monday before calling the tool."
+          },
+          "timePreference": {
+            "enum": [
+              "morning",
+              "afternoon",
+              "any"
+            ],
+            "type": "string",
+            "description": "Preferred part of the day. Use morning for 10:00-14:00, afternoon for 16:00-18:00, or any when the caller has no preference."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Checks the business Google Calendar for available 30-minute discovery call slots on a specific date. Use this tool only after the caller has provided a preferred date. Never invent availability without calling this tool."
+    },
+    "messages": [
+      {
+        "type": "request-start",
+        "content": "Déjame comprobar la agenda un momento.",
+        "blocking": false
+      },
+      {
+        "type": "request-failed",
+        "content": "Ahora mismo estoy teniendo una dificultad para consultar la agenda.",
+        "endCallAfterSpokenEnabled": false
+      }
+    ],
+    "server": {
+      "url": "YOUR_N8N_CHECK_AVAILABILITY_WEBHOOK_URL",
+      "timeoutSeconds": 30,
+      "staticIpAddressesEnabled": false
+    },
+    "variableExtractionPlan": {
+      "schema": {
+        "type": "object",
+        "required": [],
+        "properties": {}
+      }
+    }
+  }
+}
