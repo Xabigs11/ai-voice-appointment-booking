@@ -1,0 +1,1335 @@
+{
+  "name": "PORTFOLIO 02 - Book Appointment",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst payload = input.body ?? input;\nconst message = payload.message ?? {};\n\nconst EXPECTED_FUNCTION_NAME = \"reservar_cita\";\nconst TIMEZONE = \"Europe/Madrid\";\nconst MEETING_DURATION_MINUTES = 30;\nconst MAX_ADVANCE_DAYS = 30;\nconst MINIMUM_NOTICE_HOURS = 2;\n\n// --------------------------------------------------\n// 1. Localizar la llamada de herramienta\n// --------------------------------------------------\n\nlet toolCalls = [];\n\nif (Array.isArray(message.toolCallList)) {\n  toolCalls = message.toolCallList;\n} else if (Array.isArray(message.toolCalls)) {\n  toolCalls = message.toolCalls;\n} else if (Array.isArray(message.toolWithToolCallList)) {\n  toolCalls = message.toolWithToolCallList.map(\n    (entry) => entry.toolCall ?? entry\n  );\n}\n\nconst toolCall = toolCalls[0] ?? null;\n\n// --------------------------------------------------\n// 2. Extraer argumentos\n// --------------------------------------------------\n\nlet args =\n  toolCall?.arguments ??\n  toolCall?.parameters ??\n  toolCall?.function?.arguments ??\n  {};\n\nif (typeof args === \"string\") {\n  try {\n    args = JSON.parse(args);\n  } catch {\n    args = {};\n  }\n}\n\nif (!args || typeof args !== \"object\" || Array.isArray(args)) {\n  args = {};\n}\n\nconst cleanText = (value) => {\n  if (value === null || value === undefined) {\n    return \"\";\n  }\n\n  return String(value)\n    .replace(/\\s+/g, \" \")\n    .trim();\n};\n\n// --------------------------------------------------\n// 3. Normalizar parámetros\n// --------------------------------------------------\n\nconst toolCallId = cleanText(toolCall?.id);\n\nconst functionName = cleanText(\n  toolCall?.name ??\n  toolCall?.function?.name\n);\n\nconst clientName = cleanText(args.clientName);\n\nconst clientEmail = cleanText(\n  args.clientEmail\n).toLowerCase();\n\nconst businessName = cleanText(args.businessName);\nconst service = cleanText(args.service);\nconst projectSummary = cleanText(args.projectSummary);\nconst date = cleanText(args.date);\nconst startTime = cleanText(args.startTime);\n\n// Información operativa de Vapi\nconst chatId = cleanText(\n  message.chat?.id ??\n  input.headers?.[\"x-chat-id\"]\n);\n\nconst callId = cleanText(\n  message.call?.id ??\n  message.assistant?.variableValues?.call?.id\n);\n\n// --------------------------------------------------\n// 4. Funciones de validación\n// --------------------------------------------------\n\nconst isValidEmail = (email) => {\n  return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n};\n\nconst parseCalendarDate = (value) => {\n  const match = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(\n    value\n  );\n\n  if (!match) {\n    return null;\n  }\n\n  const year = Number(match[1]);\n  const month = Number(match[2]);\n  const day = Number(match[3]);\n\n  const parsedDate = new Date(\n    Date.UTC(year, month - 1, day)\n  );\n\n  const isRealDate =\n    parsedDate.getUTCFullYear() === year &&\n    parsedDate.getUTCMonth() === month - 1 &&\n    parsedDate.getUTCDate() === day;\n\n  return isRealDate ? parsedDate : null;\n};\n\nconst getCurrentDateInTimezone = (timezone) => {\n  const parts = new Intl.DateTimeFormat(\"en-GB\", {\n    timeZone: timezone,\n    year: \"numeric\",\n    month: \"2-digit\",\n    day: \"2-digit\",\n  }).formatToParts(new Date());\n\n  const values = {};\n\n  for (const part of parts) {\n    if (part.type !== \"literal\") {\n      values[part.type] = part.value;\n    }\n  }\n\n  return `${values.year}-${values.month}-${values.day}`;\n};\n\nconst minutesToTime = (totalMinutes) => {\n  const hours = Math.floor(totalMinutes / 60);\n  const minutes = totalMinutes % 60;\n\n  return `${String(hours).padStart(2, \"0\")}:${String(\n    minutes\n  ).padStart(2, \"0\")}`;\n};\n\nconst localDateTimeToUtc = (\n  dateString,\n  totalMinutes,\n  timezone\n) => {\n  const [year, month, day] = dateString\n    .split(\"-\")\n    .map(Number);\n\n  const hour = Math.floor(totalMinutes / 60);\n  const minute = totalMinutes % 60;\n\n  const desiredUtcValue = Date.UTC(\n    year,\n    month - 1,\n    day,\n    hour,\n    minute,\n    0\n  );\n\n  let utcGuess = desiredUtcValue;\n\n  const formatter = new Intl.DateTimeFormat(\"en-GB\", {\n    timeZone: timezone,\n    year: \"numeric\",\n    month: \"2-digit\",\n    day: \"2-digit\",\n    hour: \"2-digit\",\n    minute: \"2-digit\",\n    second: \"2-digit\",\n    hourCycle: \"h23\",\n  });\n\n  for (let attempt = 0; attempt < 3; attempt++) {\n    const parts = formatter.formatToParts(\n      new Date(utcGuess)\n    );\n\n    const values = {};\n\n    for (const part of parts) {\n      if (part.type !== \"literal\") {\n        values[part.type] = Number(part.value);\n      }\n    }\n\n    const formattedUtcValue = Date.UTC(\n      values.year,\n      values.month - 1,\n      values.day,\n      values.hour,\n      values.minute,\n      values.second\n    );\n\n    const difference =\n      desiredUtcValue - formattedUtcValue;\n\n    utcGuess += difference;\n\n    if (difference === 0) {\n      break;\n    }\n  }\n\n  return new Date(utcGuess);\n};\n\n// --------------------------------------------------\n// 5. Validar datos obligatorios\n// --------------------------------------------------\n\nconst errors = [];\n\nif (!toolCall) {\n  errors.push(\n    \"No se ha encontrado ninguna llamada de herramienta\"\n  );\n}\n\nif (!toolCallId) {\n  errors.push(\n    \"Falta el identificador de la llamada de herramienta\"\n  );\n}\n\nif (!functionName) {\n  errors.push(\"Falta el nombre de la función\");\n} else if (functionName !== EXPECTED_FUNCTION_NAME) {\n  errors.push(\n    `La función recibida es \"${functionName}\", pero se esperaba \"${EXPECTED_FUNCTION_NAME}\"`\n  );\n}\n\nif (!clientName) {\n  errors.push(\"Falta el nombre del cliente\");\n}\n\nif (!clientEmail) {\n  errors.push(\"Falta el correo electrónico\");\n} else if (!isValidEmail(clientEmail)) {\n  errors.push(\n    \"El correo electrónico no tiene un formato válido\"\n  );\n}\n\nif (!businessName) {\n  errors.push(\"Falta el nombre del negocio\");\n}\n\nif (!service) {\n  errors.push(\"Falta el servicio solicitado\");\n}\n\nif (!projectSummary) {\n  errors.push(\"Falta el resumen del proyecto\");\n}\n\n// --------------------------------------------------\n// 6. Validar fecha\n// --------------------------------------------------\n\nconst requestedDate = parseCalendarDate(date);\nconst currentDate = getCurrentDateInTimezone(TIMEZONE);\nconst todayDate = parseCalendarDate(currentDate);\n\nlet daysInAdvance = null;\nlet isWeekend = false;\n\nif (!date) {\n  errors.push(\"Falta la fecha de la reunión\");\n} else if (!requestedDate) {\n  errors.push(\n    \"La fecha debe ser una fecha real con formato YYYY-MM-DD\"\n  );\n}\n\nif (requestedDate && todayDate) {\n  daysInAdvance = Math.round(\n    (requestedDate.getTime() - todayDate.getTime()) /\n      (24 * 60 * 60 * 1000)\n  );\n\n  const dayOfWeek = requestedDate.getUTCDay();\n  isWeekend = dayOfWeek === 0 || dayOfWeek === 6;\n\n  if (daysInAdvance < 0) {\n    errors.push(\n      \"No se puede reservar una reunión en una fecha pasada\"\n    );\n  }\n\n  if (daysInAdvance > MAX_ADVANCE_DAYS) {\n    errors.push(\n      `No se puede reservar con más de ${MAX_ADVANCE_DAYS} días de antelación`\n    );\n  }\n\n  if (isWeekend) {\n    errors.push(\n      \"NovaWeb Studio no ofrece reuniones los sábados ni los domingos\"\n    );\n  }\n}\n\n// --------------------------------------------------\n// 7. Validar hora y horario comercial\n// --------------------------------------------------\n\nconst timeMatch =\n  /^([01]\\d|2[0-3]):([0-5]\\d)$/.exec(startTime);\n\nlet startMinutes = null;\nlet endMinutes = null;\nlet endTime = \"\";\nlet startTimeUtc = \"\";\nlet endTimeUtc = \"\";\n\nif (!startTime) {\n  errors.push(\"Falta la hora de inicio\");\n} else if (!timeMatch) {\n  errors.push(\n    \"La hora debe utilizar el formato HH:MM de 24 horas\"\n  );\n} else {\n  startMinutes =\n    Number(timeMatch[1]) * 60 +\n    Number(timeMatch[2]);\n\n  endMinutes =\n    startMinutes + MEETING_DURATION_MINUTES;\n\n  endTime = minutesToTime(endMinutes);\n\n  const startsOnValidBoundary =\n    startMinutes % MEETING_DURATION_MINUTES === 0;\n\n  const fitsMorning =\n    startMinutes >= 10 * 60 &&\n    endMinutes <= 14 * 60;\n\n  const fitsAfternoon =\n    startMinutes >= 16 * 60 &&\n    endMinutes <= 18 * 60;\n\n  if (!startsOnValidBoundary) {\n    errors.push(\n      \"La reunión debe comenzar en un intervalo de 30 minutos\"\n    );\n  }\n\n  if (!fitsMorning && !fitsAfternoon) {\n    errors.push(\n      \"La hora seleccionada está fuera del horario disponible\"\n    );\n  }\n}\n\n// --------------------------------------------------\n// 8. Convertir la cita a UTC\n// --------------------------------------------------\n\nif (\n  requestedDate &&\n  startMinutes !== null &&\n  !isWeekend\n) {\n  const startDateUtc = localDateTimeToUtc(\n    date,\n    startMinutes,\n    TIMEZONE\n  );\n\n  const endDateUtc = localDateTimeToUtc(\n    date,\n    endMinutes,\n    TIMEZONE\n  );\n\n  startTimeUtc = startDateUtc.toISOString();\n  endTimeUtc = endDateUtc.toISOString();\n\n  const minimumAllowedTime =\n    Date.now() +\n    MINIMUM_NOTICE_HOURS * 60 * 60 * 1000;\n\n  if (startDateUtc.getTime() < minimumAllowedTime) {\n    errors.push(\n      `La reunión debe reservarse con al menos ${MINIMUM_NOTICE_HOURS} horas de antelación`\n    );\n  }\n}\n\n// --------------------------------------------------\n// 9. Preparar datos para Google Calendar\n// --------------------------------------------------\n\nconst dateLabel = requestedDate\n  ? new Intl.DateTimeFormat(\"es-ES\", {\n      weekday: \"long\",\n      day: \"numeric\",\n      month: \"long\",\n      year: \"numeric\",\n      timeZone: \"UTC\",\n    }).format(\n      new Date(`${date}T12:00:00.000Z`)\n    )\n  : \"\";\n\nconst eventTitle =\n  clientName && businessName\n    ? `Discovery Call — ${businessName} — ${clientName}`\n    : \"Discovery Call — NovaWeb Studio\";\n\nconst eventDescription = [\n  `Cliente: ${clientName}`,\n  `Correo: ${clientEmail}`,\n  `Negocio: ${businessName}`,\n  `Servicio: ${service}`,\n  `Objetivo: ${projectSummary}`,\n  `Duración: ${MEETING_DURATION_MINUTES} minutos`,\n  callId ? `Vapi Call ID: ${callId}` : \"\",\n  chatId ? `Vapi Chat ID: ${chatId}` : \"\",\n]\n  .filter(Boolean)\n  .join(\"\\n\");\n\nconst bookingKey = [\n  clientEmail,\n  date,\n  startTime,\n]\n  .filter(Boolean)\n  .join(\"|\")\n  .toLowerCase();\n\n// --------------------------------------------------\n// 10. Resultado\n// --------------------------------------------------\n\nreturn [\n  {\n    json: {\n      toolCallId,\n      functionName,\n\n      clientName,\n      clientEmail,\n      businessName,\n      service,\n      projectSummary,\n\n      date,\n      dateLabel,\n      startTime,\n      endTime,\n      timezone: TIMEZONE,\n      meetingDurationMinutes: MEETING_DURATION_MINUTES,\n\n      startTimeUtc,\n      endTimeUtc,\n\n      currentDate,\n      daysInAdvance,\n      isWeekend,\n\n      eventTitle,\n      eventDescription,\n      bookingKey,\n\n      chatId,\n      callId,\n\n      valid: errors.length === 0,\n      errors,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        -32
+      ],
+      "id": "e0af38c7-a42c-46a3-80fb-9ef4064a3b35",
+      "name": "Normalizar y validar reserva"
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CALENDAR_ID",
+          "mode": "id"
+        },
+        "timeMin": "={{ $json.startTimeUtc }}",
+        "timeMax": "={{ $json.endTimeUtc }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        400,
+        -304
+      ],
+      "id": "b7384955-ed1c-4391-a500-9b0bc65e624d",
+      "name": "Recomprobar horario seleccionado"
+    },
+    {
+      "parameters": {
+        "jsCode": "const calendarResult = $input.first().json;\n\nconst booking = $(\n  \"Normalizar y validar reserva\"\n).first().json;\n\nconst available =\n  calendarResult.available === true ||\n  calendarResult.available === \"true\";\n\nreturn [\n  {\n    json: {\n      ...booking,\n      available,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        -304
+      ],
+      "id": "1eeafbdb-3cf3-4b32-b8a8-63ea56010eda",
+      "name": "Combinar reserva y disponibilidad"
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $input.first().json;\n\nconst booking = $(\n  \"Normalizar y validar reserva\"\n).first().json;\n\nconst meetEntry = Array.isArray(\n  event.conferenceData?.entryPoints\n)\n  ? event.conferenceData.entryPoints.find(\n      (entry) => entry.entryPointType === \"video\"\n    )\n  : null;\n\nconst meetLink =\n  event.hangoutLink ??\n  meetEntry?.uri ??\n  \"\";\n\nconst calendarEventId = String(\n  event.id ?? \"\"\n).trim();\n\nconst calendarLink = String(\n  event.htmlLink ?? \"\"\n).trim();\n\nconst calendarStatus = String(\n  event.status ?? \"\"\n).trim();\n\nconst bookingCreated =\n  calendarEventId &&\n  calendarStatus === \"confirmed\";\n\nif (!bookingCreated) {\n  throw new Error(\n    \"Google Calendar no ha confirmado la creación del evento\"\n  );\n}\n\nreturn [\n  {\n    json: {\n      ...booking,\n\n      bookingStatus: \"CONFIRMED\",\n      calendarEventId,\n      calendarStatus,\n      calendarLink,\n      meetLink,\n\n      calendarStart:\n        event.start?.dateTime ??\n        booking.startTimeUtc,\n\n      calendarEnd:\n        event.end?.dateTime ??\n        booking.endTimeUtc,\n\n      calendarTimezone:\n        event.start?.timeZone ??\n        booking.timezone,\n\n      attendeeResponseStatus:\n        event.attendees?.[0]?.responseStatus ??\n        \"needsAction\",\n\n      calendarCreatedAt:\n        event.created ??\n        new Date().toISOString(),\n\n      confirmedAt: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        -480
+      ],
+      "id": "37db6747-ca58-4364-a2b3-07b3e200daff",
+      "name": "Preparar reserva confirmada"
+    },
+    {
+      "parameters": {
+        "jsCode": "const booking = $input.first().json;\n\nconst toolCallId = String(\n  booking.toolCallId ?? \"\"\n).trim();\n\nconst calendarEventId = String(\n  booking.calendarEventId ?? \"\"\n).trim();\n\nconst bookingStatus = String(\n  booking.bookingStatus ?? \"\"\n).trim();\n\nif (!toolCallId) {\n  throw new Error(\n    \"No existe toolCallId para responder a Vapi\"\n  );\n}\n\nif (\n  bookingStatus !== \"CONFIRMED\" ||\n  !calendarEventId\n) {\n  const errorResult = {\n    status: \"booking_failed\",\n    message:\n      \"No se ha podido confirmar la creación de la reunión.\",\n    instruction:\n      \"No afirmes que la reunión está reservada. Indica que ha ocurrido un problema técnico y ofrece seguimiento por correo.\",\n  };\n\n  return [\n    {\n      json: {\n        results: [\n          {\n            toolCallId,\n            error: JSON.stringify(errorResult),\n          },\n        ],\n      },\n    },\n  ];\n}\n\nconst successResult = {\n  status: \"booked\",\n  message: \"La reunión se ha reservado correctamente.\",\n\n  clientName: booking.clientName,\n  businessName: booking.businessName,\n\n  date: booking.date,\n  dateLabel: booking.dateLabel,\n  startTime: booking.startTime,\n  endTime: booking.endTime,\n  timezone: booking.timezone,\n  durationMinutes: booking.meetingDurationMinutes,\n\n  calendarEventId,\n  meetLink: booking.meetLink || null,\n  calendarLink: booking.calendarLink || null,\n\n  instruction:\n    \"Confirma al usuario que la reunión está reservada. Comunica la fecha, la hora y la duración. Indica que recibirá la invitación por correo y menciona que el enlace de Google Meet está incluido. Después pregunta si necesita algo más.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(successResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        -480
+      ],
+      "id": "30cec858-4fdd-4768-8337-30de49e6c8ea",
+      "name": "Preparar respuesta de éxito para Vapi"
+    },
+    {
+      "parameters": {
+        "jsCode": "const sourceItems = $(\n  \"Preparar reserva confirmada\"\n).all();\n\nif (sourceItems.length === 0) {\n  throw new Error(\n    \"No se han encontrado los datos de la reserva confirmada\"\n  );\n}\n\nconst booking = sourceItems[0].json;\n\nif (!booking.calendarEventId) {\n  throw new Error(\n    \"La reserva no contiene un ID de evento de Google Calendar\"\n  );\n}\n\nif (booking.bookingStatus !== \"CONFIRMED\") {\n  throw new Error(\n    \"La reserva recuperada no está confirmada\"\n  );\n}\n\nreturn [\n  {\n    json: {\n      ...booking,\n\n      vapiResponseSent: true,\n      vapiResponseSentAt: new Date().toISOString(),\n\n      crmStatus: \"PENDING\",\n      confirmationEmailStatus: \"PENDING\",\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        -480
+      ],
+      "id": "d6dc04df-bf8e-4eaf-a893-7a0b5e001177",
+      "name": "Recuperar datos para CRM"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// --------------------------------------------------\n// 1. Funciones auxiliares\n// --------------------------------------------------\n\nconst escapeHtml = (value) => {\n  return String(value ?? \"\")\n    .replace(/&/g, \"&amp;\")\n    .replace(/</g, \"&lt;\")\n    .replace(/>/g, \"&gt;\")\n    .replace(/\"/g, \"&quot;\")\n    .replace(/'/g, \"&#039;\");\n};\n\nconst normalizarEnlace = (value, fieldName) => {\n  let enlace = String(value ?? \"\").trim();\n\n  // Admite también un enlace recibido accidentalmente\n  // con formato Markdown: [texto](https://...)\n  const markdownMatch = enlace.match(\n    /^\\[[^\\]]+\\]\\((https:\\/\\/[^)]+)\\)$/i\n  );\n\n  if (markdownMatch) {\n    enlace = markdownMatch[1];\n  }\n\n  if (!/^https:\\/\\/[^\\s\"'<>]+$/i.test(enlace)) {\n    throw new Error(\n      `El campo ${fieldName} no contiene una URL HTTPS válida: ${enlace}`\n    );\n  }\n\n  return enlace;\n};\n\n// --------------------------------------------------\n// 2. Recuperación y validación de datos\n// --------------------------------------------------\n\nconst appointmentDate = String(\n  data.appointment_date ?? \"\"\n).trim();\n\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(appointmentDate)) {\n  throw new Error(\n    \"La fecha de la reunión no utiliza el formato YYYY-MM-DD\"\n  );\n}\n\nconst emailTo = String(\n  data.client_email ?? \"\"\n)\n  .trim()\n  .toLowerCase();\n\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(emailTo)) {\n  throw new Error(\n    `El correo del cliente no es válido: ${emailTo}`\n  );\n}\n\nconst meetLink = normalizarEnlace(\n  data.meet_link,\n  \"meet_link\"\n);\n\nconst calendarLink = normalizarEnlace(\n  data.calendar_link,\n  \"calendar_link\"\n);\n\n// --------------------------------------------------\n// 3. Preparación de los textos\n// --------------------------------------------------\n\nconst dateForFormatting = new Date(\n  `${appointmentDate}T12:00:00.000Z`\n);\n\nlet dateLabel = new Intl.DateTimeFormat(\n  \"es-ES\",\n  {\n    weekday: \"long\",\n    day: \"numeric\",\n    month: \"long\",\n    year: \"numeric\",\n    timeZone: \"UTC\",\n  }\n).format(dateForFormatting);\n\ndateLabel =\n  dateLabel.charAt(0).toUpperCase() +\n  dateLabel.slice(1);\n\nconst clientName = escapeHtml(data.client_name);\nconst businessName = escapeHtml(data.business_name);\nconst service = escapeHtml(data.service);\nconst startTime = escapeHtml(data.start_time);\nconst endTime = escapeHtml(data.end_time);\nconst timezone = escapeHtml(\n  data.timezone || \"Europe/Madrid\"\n);\n\nconst safeDateLabel = escapeHtml(dateLabel);\nconst safeMeetLink = escapeHtml(meetLink);\nconst safeCalendarLink = escapeHtml(calendarLink);\n\nconst emailSubject =\n  `Reunión confirmada con NovaWeb Studio — ${dateLabel} a las ${data.start_time}`;\n\n// --------------------------------------------------\n// 4. HTML del correo\n// --------------------------------------------------\n\nconst emailHtml = `\n<!doctype html>\n<html lang=\"es\">\n<head>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width\">\n  <title>Reunión confirmada</title>\n</head>\n\n<body style=\"margin:0;padding:0;background-color:#f3f5f8;font-family:Arial,Helvetica,sans-serif;color:#172033;\">\n\n  <div style=\"display:none;max-height:0;overflow:hidden;opacity:0;\">\n    Tu reunión con NovaWeb Studio está confirmada para el ${safeDateLabel} a las ${startTime}.\n  </div>\n\n  <table\n    role=\"presentation\"\n    width=\"100%\"\n    cellspacing=\"0\"\n    cellpadding=\"0\"\n    border=\"0\"\n    style=\"background-color:#f3f5f8;\"\n  >\n    <tr>\n      <td align=\"center\" style=\"padding:32px 16px;\">\n\n        <table\n          role=\"presentation\"\n          width=\"100%\"\n          cellspacing=\"0\"\n          cellpadding=\"0\"\n          border=\"0\"\n          style=\"max-width:620px;background:#ffffff;border:1px solid #dfe4ec;border-radius:16px;overflow:hidden;\"\n        >\n\n          <!-- Cabecera -->\n          <tr>\n            <td style=\"padding:28px 32px;background:#172033;\">\n              <table\n                role=\"presentation\"\n                width=\"100%\"\n                cellspacing=\"0\"\n                cellpadding=\"0\"\n                border=\"0\"\n              >\n                <tr>\n                  <td style=\"font-size:22px;font-weight:700;color:#ffffff;\">\n                    NovaWeb\n                    <span style=\"color:#43d7a0;\">\n                      Studio\n                    </span>\n                  </td>\n\n                  <td align=\"right\">\n                    <span style=\"display:inline-block;padding:8px 13px;background:#185f4d;border-radius:20px;color:#72e8ba;font-size:12px;font-weight:700;\">\n                      CONFIRMADA\n                    </span>\n                  </td>\n                </tr>\n              </table>\n            </td>\n          </tr>\n\n          <!-- Contenido -->\n          <tr>\n            <td style=\"padding:36px 32px;\">\n\n              <div style=\"font-size:13px;font-weight:700;letter-spacing:1px;color:#218c68;\">\n                REUNIÓN RESERVADA\n              </div>\n\n              <h1 style=\"margin:12px 0 16px;font-size:28px;line-height:1.25;color:#172033;\">\n                Tu reunión está confirmada\n              </h1>\n\n              <p style=\"margin:0 0 24px;font-size:16px;line-height:1.6;color:#5a6578;\">\n                Hola\n                <strong style=\"color:#172033;\">\n                  ${clientName}\n                </strong>,\n                hemos reservado correctamente tu reunión con\n                NovaWeb Studio. La invitación también se ha enviado\n                a tu calendario.\n              </p>\n\n              <!-- Detalles -->\n              <table\n                role=\"presentation\"\n                width=\"100%\"\n                cellspacing=\"0\"\n                cellpadding=\"0\"\n                border=\"0\"\n                style=\"border:1px solid #dfe4ec;border-radius:12px;border-collapse:separate;overflow:hidden;\"\n              >\n                <tr>\n                  <td\n                    colspan=\"2\"\n                    style=\"padding:16px 20px;background:#f7f8fa;font-size:16px;font-weight:700;color:#172033;\"\n                  >\n                    Detalles de la reunión\n                  </td>\n                </tr>\n\n                <tr>\n                  <td style=\"width:36%;padding:14px 20px;border-top:1px solid #dfe4ec;color:#778195;\">\n                    Fecha\n                  </td>\n\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;font-weight:700;color:#172033;\">\n                    ${safeDateLabel}\n                  </td>\n                </tr>\n\n                <tr>\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;color:#778195;\">\n                    Horario\n                  </td>\n\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;font-weight:700;color:#172033;\">\n                    ${startTime}–${endTime}\n                  </td>\n                </tr>\n\n                <tr>\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;color:#778195;\">\n                    Zona horaria\n                  </td>\n\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;font-weight:700;color:#172033;\">\n                    ${timezone}\n                  </td>\n                </tr>\n\n                <tr>\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;color:#778195;\">\n                    Negocio\n                  </td>\n\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;font-weight:700;color:#172033;\">\n                    ${businessName}\n                  </td>\n                </tr>\n\n                <tr>\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;color:#778195;\">\n                    Servicio\n                  </td>\n\n                  <td style=\"padding:14px 20px;border-top:1px solid #dfe4ec;font-weight:700;color:#172033;\">\n                    ${service}\n                  </td>\n                </tr>\n              </table>\n\n              <!-- Botones -->\n              <table\n                role=\"presentation\"\n                width=\"100%\"\n                cellspacing=\"0\"\n                cellpadding=\"0\"\n                border=\"0\"\n                style=\"margin-top:28px;\"\n              >\n                <tr>\n                  <td align=\"center\">\n\n                    <a\n                      href=\"${safeMeetLink}\"\n                      target=\"_blank\"\n                      rel=\"noopener noreferrer\"\n                      style=\"display:inline-block;padding:14px 27px;background:#218c68;color:#ffffff;text-decoration:none;border-radius:28px;font-size:16px;font-weight:700;\"\n                    >\n                      Acceder a Google Meet\n                    </a>\n\n                  </td>\n                </tr>\n\n                <tr>\n                  <td align=\"center\" style=\"padding-top:17px;\">\n\n                    <a\n                      href=\"${safeCalendarLink}\"\n                      target=\"_blank\"\n                      rel=\"noopener noreferrer\"\n                      style=\"font-size:14px;color:#218c68;text-decoration:underline;\"\n                    >\n                      Ver evento en Google Calendar\n                    </a>\n\n                  </td>\n                </tr>\n              </table>\n\n              <!-- Aviso -->\n              <div style=\"margin-top:30px;padding:18px 20px;background:#edf9f4;border-left:4px solid #43d7a0;border-radius:8px;color:#426257;font-size:14px;line-height:1.6;\">\n                Si necesitas modificar la reunión, responde\n                directamente a este correo y te ayudaremos.\n              </div>\n\n            </td>\n          </tr>\n\n          <!-- Pie -->\n          <tr>\n            <td\n              align=\"center\"\n              style=\"padding:22px 32px;background:#172033;color:#b8c1d1;font-size:13px;line-height:1.6;\"\n            >\n              Confirmación automática de reserva\n              <br>\n\n              <strong style=\"color:#ffffff;\">\n                NovaWeb\n                <span style=\"color:#43d7a0;\">\n                  Studio\n                </span>\n              </strong>\n            </td>\n          </tr>\n\n        </table>\n\n      </td>\n    </tr>\n  </table>\n\n</body>\n</html>\n`;\n\n// --------------------------------------------------\n// 5. Resultado\n// --------------------------------------------------\n\nreturn [\n  {\n    json: {\n      ...data,\n\n      date_label: dateLabel,\n\n      // Enlaces normalizados para poder revisarlos\n      meet_link_normalized: meetLink,\n      calendar_link_normalized: calendarLink,\n\n      // Datos que utilizará Gmail\n      email_to: emailTo,\n      email_subject: emailSubject,\n      email_html: emailHtml,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2448,
+        -480
+      ],
+      "id": "75777f21-3e69-4c6c-a637-b941415f9fc2",
+      "name": "Preparar email de confirmación"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "YOUR_SHEET_TAB_NAME",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "booking_key": "={{ $json.bookingKey }}",
+            "crm_stage": "MEETING_BOOKED",
+            "booking_status": "={{ $json.bookingStatus }}",
+            "source": "VAPI_VOICE_AGENT",
+            "client_name": "={{ $json.clientName }}",
+            "client_email": "={{ $json.clientEmail }}",
+            "business_name": "={{ $json.businessName }}",
+            "service": "={{ $json.service }}",
+            "project_summary": "={{ $json.projectSummary }}",
+            "appointment_date": "={{ $json.date }}",
+            "start_time": "={{ $json.startTime }}",
+            "end_time": "={{ $json.endTime }}",
+            "start_time_utc": "={{ $json.startTimeUtc }}",
+            "end_time_utc": "={{ $json.endTimeUtc }}",
+            "timezone": "={{ $json.timezone }}",
+            "duration_minutes": "={{ $json.meetingDurationMinutes }}",
+            "calendar_status": "={{ $json.calendarStatus }}",
+            "meet_link": "={{ $json.meetLink }}",
+            "calendar_link": "={{ $json.calendarLink }}",
+            "attendee_response_status": "={{ $json.attendeeResponseStatus }}",
+            "vapi_call_id": "={{ $json.callId }}",
+            "vapi_chat_id": "={{ $json.chatId }}",
+            "calendar_created_at": "={{ $json.calendarCreatedAt }}",
+            "confirmed_at": "={{ $json.confirmedAt }}",
+            "vapi_response_sent_at": "={{ $json.vapiResponseSentAt }}",
+            "confirmation_email_status": "PENDING",
+            "last_updated_at": "={{ $now.toISO() }}",
+            "calendar_event_id": "={{ $json.calendarEventId }}"
+          },
+          "matchingColumns": [
+            "booking_key"
+          ],
+          "schema": [
+            {
+              "id": "booking_key",
+              "displayName": "booking_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "crm_stage",
+              "displayName": "crm_stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "booking_status",
+              "displayName": "booking_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "client_name",
+              "displayName": "client_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "client_email",
+              "displayName": "client_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "business_name",
+              "displayName": "business_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "service",
+              "displayName": "service",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "project_summary",
+              "displayName": "project_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "appointment_date",
+              "displayName": "appointment_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "start_time",
+              "displayName": "start_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "end_time",
+              "displayName": "end_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "start_time_utc",
+              "displayName": "start_time_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "end_time_utc",
+              "displayName": "end_time_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "timezone",
+              "displayName": "timezone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "duration_minutes",
+              "displayName": "duration_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_event_id",
+              "displayName": "calendar_event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_status",
+              "displayName": "calendar_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "meet_link",
+              "displayName": "meet_link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_link",
+              "displayName": "calendar_link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attendee_response_status",
+              "displayName": "attendee_response_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_call_id",
+              "displayName": "vapi_call_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_chat_id",
+              "displayName": "vapi_chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_created_at",
+              "displayName": "calendar_created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmed_at",
+              "displayName": "confirmed_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_response_sent_at",
+              "displayName": "vapi_response_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmation_email_status",
+              "displayName": "confirmation_email_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmation_email_sent_at",
+              "displayName": "confirmation_email_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_updated_at",
+              "displayName": "last_updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "internal_notes",
+              "displayName": "internal_notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2224,
+        -480
+      ],
+      "id": "2f8f6e21-f6e0-4775-92b8-c66b31fa607c",
+      "name": "Guardar reserva en CRM"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst toolCallId = String(\n  data.toolCallId ?? \"\"\n).trim();\n\nif (!toolCallId) {\n  throw new Error(\n    \"No se ha recibido el toolCallId de Vapi\"\n  );\n}\n\nconst date = String(\n  data.date ?? \"\"\n).trim();\n\nconst startTime = String(\n  data.startTime ?? \"\"\n).trim();\n\nconst endTime = String(\n  data.endTime ?? \"\"\n).trim();\n\nconst timezone =\n  String(data.timezone ?? \"\").trim() ||\n  \"Europe/Madrid\";\n\nconst dateLabel =\n  String(data.dateLabel ?? \"\").trim() ||\n  date;\n\nconst toolResult = {\n  status: \"slot_unavailable\",\n  date,\n  dateLabel,\n  startTime,\n  endTime,\n  timezone,\n  message:\n    \"El horario seleccionado ya no está disponible.\",\n  instruction:\n    \"Informa al usuario de que ese horario acaba de dejar de estar disponible. Discúlpate brevemente y vuelve a utilizar consultar_disponibilidad para buscar alternativas. No confirmes la reserva y no digas que se ha producido un error técnico.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(toolResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        112
+      ],
+      "id": "3130b1e7-8224-45e1-9789-d8c2c2258095",
+      "name": "Preparar respuesta de horario ocupado"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst toolCallId = String(\n  data.toolCallId ?? \"\"\n).trim();\n\nif (!toolCallId) {\n  throw new Error(\n    \"No se ha recibido el toolCallId de Vapi\"\n  );\n}\n\nconst reasons =\n  Array.isArray(data.errors) && data.errors.length > 0\n    ? data.errors.map((error) => String(error))\n    : [\n        \"Los datos necesarios para realizar la reserva están incompletos o no son válidos\",\n      ];\n\nconst toolResult = {\n  status: \"invalid_request\",\n  date: data.date || null,\n  startTime: data.startTime || null,\n  timezone: data.timezone || \"Europe/Madrid\",\n  reasons,\n  instruction:\n    \"Explica brevemente al usuario qué información falta o no es válida y solicita únicamente los datos necesarios para corregir la reserva. No digas que se ha producido un error técnico y no confirmes ninguna cita.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(toolResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        352
+      ],
+      "id": "553f3832-4889-42ca-9685-725ce8f1072b",
+      "name": "Preparar respuesta de reserva inválida"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9670b8be-cec0-4a1d-9f57-2554ca52dea3",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        192,
+        -32
+      ],
+      "id": "fd3fc9a1-c50e-49fd-873c-ebd74a0fca4f",
+      "name": "¿Reserva válida?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c63fc424-c279-445a-b46c-26ed33b85894",
+              "leftValue": "={{ $json.available }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        880,
+        -304
+      ],
+      "id": "e1cfb324-ae59-48e7-a027-007e0b04e979",
+      "name": "¿Horario disponible?"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1776,
+        -480
+      ],
+      "id": "f771c458-0d46-4255-a560-f68438d0c80b",
+      "name": "Responder éxito a Vapi"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        784,
+        352
+      ],
+      "id": "6692ab63-e4bf-4fa4-9c13-b46adeffc34c",
+      "name": "Responder solicitud inválida"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1360,
+        112
+      ],
+      "id": "89adb4a7-87c6-4c1a-bdbe-014cc4559d68",
+      "name": "Responder horario ocupado"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email_to }}",
+        "subject": "={{ $json.email_subject }}",
+        "message": "={{ $json.email_html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2672,
+        -480
+      ],
+      "id": "c74c1f4c-10a9-4264-88d0-e4ea0a551156",
+      "name": "Enviar confirmación al cliente"
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CALENDAR_ID",
+          "mode": "id"
+        },
+        "start": "={{ $json.startTimeUtc }}",
+        "end": "={{ $json.endTimeUtc }}",
+        "additionalFields": {
+          "attendees": [
+            "={{ $json.clientEmail }}"
+          ],
+          "conferenceDataUi": {
+            "conferenceDataValues": {
+              "conferenceSolution": "hangoutsMeet"
+            }
+          },
+          "description": "={{ $json.eventDescription }}",
+          "guestsCanModify": false,
+          "guestsCanSeeOtherGuests": true,
+          "sendUpdates": "all",
+          "showMeAs": "opaque",
+          "summary": "={{ $json.eventTitle }}"
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1088,
+        -480
+      ],
+      "id": "24e21d40-2429-4811-8d7b-74ad3c2d3a8e",
+      "name": "Crear reunión en Calendar"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "portfolio-book-appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -256,
+        -32
+      ],
+      "id": "b34d31c4-8f9a-4997-9429-f72b9917fb30",
+      "name": "Recibir solicitud de reserva"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Datos originales preparados antes de enviar el correo\nconst reserva = $(\n  \"Preparar email de confirmación\"\n).first().json;\n\n// Resultado devuelto por Gmail\nconst gmailResult = $input.first().json;\n\nconst ahora = new Date().toISOString();\n\nconst gmailMessageId = String(\n  gmailResult.id ??\n  gmailResult.messageId ??\n  gmailResult.message_id ??\n  \"\"\n).trim();\n\nreturn [\n  {\n    json: {\n      ...reserva,\n\n      confirmation_email_status: \"SENT\",\n      confirmation_email_sent_at: ahora,\n      last_updated_at: ahora,\n\n      gmail_message_id: gmailMessageId,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2896,
+        -480
+      ],
+      "id": "7c044799-fd19-434b-9519-8ed9fca9cea8",
+      "name": "Preparar registro de email enviado"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "YOUR_SHEET_TAB_NAME",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "booking_key": "={{ $json.booking_key }}",
+            "crm_stage": "MEETING_BOOKED",
+            "booking_status": "={{ $json.booking_status }}",
+            "source": "VAPI_VOICE_AGENT",
+            "client_name": "={{ $json.client_name }}",
+            "client_email": "={{ $json.client_email }}",
+            "business_name": "={{ $json.business_name }}",
+            "service": "={{ $json.service }}",
+            "project_summary": "={{ $json.project_summary }}",
+            "appointment_date": "={{ $json.appointment_date }}",
+            "start_time": "={{ $json.start_time }}",
+            "end_time": "={{ $json.end_time }}",
+            "start_time_utc": "={{ $json.start_time_utc }}",
+            "end_time_utc": "={{ $json.end_time_utc }}",
+            "timezone": "={{ $json.timezone }}",
+            "duration_minutes": "={{ $json.duration_minutes }}",
+            "calendar_status": "={{ $json.calendar_status }}",
+            "meet_link": "={{ $json.meet_link }}",
+            "calendar_link": "={{ $json.calendar_link }}",
+            "attendee_response_status": "={{ $json.attendee_response_status }}",
+            "vapi_call_id": "={{ $json.vapi_call_id }}",
+            "vapi_chat_id": "={{ $json.vapi_chat_id }}",
+            "calendar_created_at": "={{ $json.calendar_created_at }}",
+            "confirmed_at": "={{ $json.confirmed_at }}",
+            "vapi_response_sent_at": "={{ $('Preparar email de confirmación').item.json.vapi_response_sent_at }}",
+            "confirmation_email_status": "={{ $json.confirmation_email_status }}",
+            "last_updated_at": "={{ $json.last_updated_at }}",
+            "calendar_event_id": "={{ $json.calendar_event_id }}",
+            "confirmation_email_sent_at": "={{ $json.confirmation_email_sent_at }}"
+          },
+          "matchingColumns": [
+            "booking_key"
+          ],
+          "schema": [
+            {
+              "id": "booking_key",
+              "displayName": "booking_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "crm_stage",
+              "displayName": "crm_stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "booking_status",
+              "displayName": "booking_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "client_name",
+              "displayName": "client_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "client_email",
+              "displayName": "client_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "business_name",
+              "displayName": "business_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "service",
+              "displayName": "service",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "project_summary",
+              "displayName": "project_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "appointment_date",
+              "displayName": "appointment_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "start_time",
+              "displayName": "start_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "end_time",
+              "displayName": "end_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "start_time_utc",
+              "displayName": "start_time_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "end_time_utc",
+              "displayName": "end_time_utc",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "timezone",
+              "displayName": "timezone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "duration_minutes",
+              "displayName": "duration_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_event_id",
+              "displayName": "calendar_event_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_status",
+              "displayName": "calendar_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "meet_link",
+              "displayName": "meet_link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_link",
+              "displayName": "calendar_link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "attendee_response_status",
+              "displayName": "attendee_response_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_call_id",
+              "displayName": "vapi_call_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_chat_id",
+              "displayName": "vapi_chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_created_at",
+              "displayName": "calendar_created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmed_at",
+              "displayName": "confirmed_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vapi_response_sent_at",
+              "displayName": "vapi_response_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmation_email_status",
+              "displayName": "confirmation_email_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confirmation_email_sent_at",
+              "displayName": "confirmation_email_sent_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_updated_at",
+              "displayName": "last_updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "internal_notes",
+              "displayName": "internal_notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        3120,
+        -480
+      ],
+      "id": "e7fa1add-77cb-454f-a514-ad9165fa2ee5",
+      "name": "Registrar email enviado en CRM"
+    },
+    {
+      "parameters": {
+        "content": "## AI Voice Appointment \n\nBooking & CRM Automation\n\nProduction-style booking workflow for a Spanish-speaking AI voice assistant.\n\nThe system collects lead information through Vapi, validates the booking request, checks live calendar availability, creates a Google Meet appointment, registers the lead in a CRM and sends a branded confirmation email.\n\nCore integrations:\n• Vapi + ElevenLabs\n• n8n\n• Google Calendar\n• Google Sheets CRM\n• Gmail\n\nThe workflow is modular and can be adapted to different voice platforms, calendars, CRM systems, forms and email providers.",
+        "height": 448,
+        "width": 576
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1024,
+        -816
+      ],
+      "id": "30b1d686-635b-4623-9235-502b79040eac",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## 2. Invalid Request Handling\n\nInvalid or incomplete booking requests are prevented from reaching Google Calendar.\n\nThe workflow returns a structured response containing the exact validation reasons. The voice assistant can then request only the information that needs to be corrected.\n\nNo calendar event, CRM record or confirmation email is created on this branch.",
+        "height": 256,
+        "width": 416
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        496,
+        48
+      ],
+      "id": "83e878c1-c4b3-410b-9b91-a7f779ab2778",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## 1. Voice Request Intake & Validation\n\nThe workflow receives a structured reservar_cita tool call from the Vapi voice assistant.\n\nClient name, email, business, requested service, project objective, date and time are normalized and validated before any external action is performed.\n\nThe validation layer checks required fields, email format, date format, business rules, weekends and timezone consistency.",
+        "height": 272,
+        "width": 480
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        -368
+      ],
+      "id": "27df6a99-e83d-4ab5-8db4-1a64d8844e85",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## 3. Real-Time Availability Recheck\n\nAvailability is checked again immediately before creating the appointment.\n\nEven if the slot was available when it was first offered by consultar_disponibilidad, another person may have booked it before the user confirmed.\n\nThis second check prevents outdated availability from creating conflicting appointments.",
+        "height": 256,
+        "width": 480
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        432,
+        -592
+      ],
+      "id": "b8390f59-e0a7-4324-a5e6-075e391974f5",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "## 4. Final Availability Recheck\n\nIf the selected time has become unavailable, the booking process stops safely.\n\nNo event is created and the assistant receives a slot_unavailable response. It can then explain the situation naturally and call consultar_disponibilidad again to offer updated alternatives.\n\nThis reduces stale-slot booking risk. Strict concurrency guarantees require a lock or transactional reservation mechanism.\n",
+        "height": 272,
+        "width": 416
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1136,
+        -208
+      ],
+      "id": "31b54510-78f8-4b11-b0b1-eadfc5b0e9f8",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "## 5. Calendar & Google Meet Creation\n\nOnce the booking is validated and the slot is confirmed as available, the workflow creates a 30-minute Google Calendar event.\n\nThe client is added as an attendee, a Google Meet link is generated and the event stores the lead details, requested service, project objective and Vapi identifiers.\n\nAll appointment times are handled using the Europe/Madrid timezone.\n",
+        "height": 272,
+        "width": 464
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1024,
+        -800
+      ],
+      "id": "80672259-6607-4984-8461-8600aee85201",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "## 6. Low-Latency Voice Response\n\nAfter the calendar event is confirmed, a structured success response is returned to Vapi immediately.\n\nThis allows the voice assistant to confirm the appointment without waiting for secondary operations such as CRM registration or email delivery.\n\nThe remaining automation continues after the voice response has been sent.",
+        "height": 336,
+        "width": 352
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1536,
+        -880
+      ],
+      "id": "0278725e-2798-4062-8fcd-1d68f06c66b7",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "## 7. CRM Registration & Idempotency\n\nThe confirmed appointment is registered in a lightweight Google Sheets CRM.\n\nEach record contains the client details, service, meeting time, Calendar event ID, Google Meet link, Vapi identifiers and operational statuses.\n\nA unique booking key based on email, date and time is used to update existing records instead of creating accidental duplicates.",
+        "height": 336,
+        "width": 352
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1968,
+        -880
+      ],
+      "id": "84c9a9c3-3585-4924-8c01-0a285578fbdb",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "## 8. Confirmation Email & Status Tracking\n\nThe client receives a branded HTML confirmation email containing the appointment details and direct access to Google Meet.\n\nAfter successful delivery, the same CRM record is updated from PENDING to SENT, including the delivery timestamp and last update time.\n\nBecause the communication layer is separated from the booking logic, Gmail can be replaced with another email or notification provider without redesigning the complete workflow.",
+        "height": 256,
+        "width": 800
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2416,
+        -848
+      ],
+      "id": "c4069dbe-bf41-4ca2-8edd-c091ec3ef0bb",
+      "name": "Sticky Note8"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalizar y validar reserva": {
+      "main": [
+        [
+          {
+            "node": "¿Reserva válida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recomprobar horario seleccionado": {
+      "main": [
+        [
+          {
+            "node": "Combinar reserva y disponibilidad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combinar reserva y disponibilidad": {
+      "main": [
+        [
+          {
+            "node": "¿Horario disponible?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar reserva confirmada": {
+      "main": [
+        [
+          {
+            "node": "Preparar respuesta de éxito para Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar respuesta de éxito para Vapi": {
+      "main": [
+        [
+          {
+            "node": "Responder éxito a Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recuperar datos para CRM": {
+      "main": [
+        [
+          {
+            "node": "Guardar reserva en CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar email de confirmación": {
+      "main": [
+        [
+          {
+            "node": "Enviar confirmación al cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar reserva en CRM": {
+      "main": [
+        [
+          {
+            "node": "Preparar email de confirmación",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar respuesta de horario ocupado": {
+      "main": [
+        [
+          {
+            "node": "Responder horario ocupado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar respuesta de reserva inválida": {
+      "main": [
+        [
+          {
+            "node": "Responder solicitud inválida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Reserva válida?": {
+      "main": [
+        [
+          {
+            "node": "Recomprobar horario seleccionado",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar respuesta de reserva inválida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Horario disponible?": {
+      "main": [
+        [
+          {
+            "node": "Crear reunión en Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar respuesta de horario ocupado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder éxito a Vapi": {
+      "main": [
+        [
+          {
+            "node": "Recuperar datos para CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar confirmación al cliente": {
+      "main": [
+        [
+          {
+            "node": "Preparar registro de email enviado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear reunión en Calendar": {
+      "main": [
+        [
+          {
+            "node": "Preparar reserva confirmada",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recibir solicitud de reserva": {
+      "main": [
+        [
+          {
+            "node": "Normalizar y validar reserva",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar registro de email enviado": {
+      "main": [
+        [
+          {
+            "node": "Registrar email enviado en CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "timezone": "Europe/Madrid",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": []
+}

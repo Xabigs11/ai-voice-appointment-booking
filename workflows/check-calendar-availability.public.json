@@ -1,0 +1,476 @@
+{
+  "name": "PORTFOLIO 02 - Check Calendar Availability",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nif (!data.valid) {\n  return [];\n}\n\nconst {\n  toolCallId,\n  functionName,\n  date,\n  timePreference,\n  timezone,\n  meetingDurationMinutes,\n} = data;\n\n// Horario comercial de NovaWeb Studio\nconst availabilityWindows = {\n  morning: [\n    {\n      start: \"10:00\",\n      end: \"14:00\",\n    },\n  ],\n  afternoon: [\n    {\n      start: \"16:00\",\n      end: \"18:00\",\n    },\n  ],\n  any: [\n    {\n      start: \"10:00\",\n      end: \"14:00\",\n    },\n    {\n      start: \"16:00\",\n      end: \"18:00\",\n    },\n  ],\n};\n\nconst selectedWindows =\n  availabilityWindows[timePreference] ??\n  availabilityWindows.any;\n\nconst timeToMinutes = (time) => {\n  const [hours, minutes] = time.split(\":\").map(Number);\n  return hours * 60 + minutes;\n};\n\nconst minutesToTime = (totalMinutes) => {\n  const hours = Math.floor(totalMinutes / 60);\n  const minutes = totalMinutes % 60;\n\n  return `${String(hours).padStart(2, \"0\")}:${String(\n    minutes\n  ).padStart(2, \"0\")}`;\n};\n\n// Convierte una fecha y hora de Europe/Madrid a UTC.\n// De esta manera también se respetan los cambios de horario de verano.\nconst localDateTimeToUtc = (\n  dateString,\n  totalMinutes,\n  timeZone\n) => {\n  const [year, month, day] = dateString\n    .split(\"-\")\n    .map(Number);\n\n  const hour = Math.floor(totalMinutes / 60);\n  const minute = totalMinutes % 60;\n\n  const desiredUtcValue = Date.UTC(\n    year,\n    month - 1,\n    day,\n    hour,\n    minute,\n    0\n  );\n\n  let utcGuess = desiredUtcValue;\n\n  const formatter = new Intl.DateTimeFormat(\"en-GB\", {\n    timeZone,\n    year: \"numeric\",\n    month: \"2-digit\",\n    day: \"2-digit\",\n    hour: \"2-digit\",\n    minute: \"2-digit\",\n    second: \"2-digit\",\n    hourCycle: \"h23\",\n  });\n\n  // Ajustamos iterativamente la diferencia entre UTC y Europe/Madrid.\n  for (let attempt = 0; attempt < 3; attempt++) {\n    const parts = formatter.formatToParts(\n      new Date(utcGuess)\n    );\n\n    const values = {};\n\n    for (const part of parts) {\n      if (part.type !== \"literal\") {\n        values[part.type] = Number(part.value);\n      }\n    }\n\n    const formattedUtcValue = Date.UTC(\n      values.year,\n      values.month - 1,\n      values.day,\n      values.hour,\n      values.minute,\n      values.second\n    );\n\n    const difference =\n      desiredUtcValue - formattedUtcValue;\n\n    utcGuess += difference;\n\n    if (difference === 0) {\n      break;\n    }\n  }\n\n  return new Date(utcGuess);\n};\n\nconst minimumNoticeMilliseconds =\n  2 * 60 * 60 * 1000;\n\nconst earliestAllowedTime =\n  Date.now() + minimumNoticeMilliseconds;\n\nconst candidates = [];\n\nlet slotIndex = 0;\n\nfor (const window of selectedWindows) {\n  const windowStart = timeToMinutes(window.start);\n  const windowEnd = timeToMinutes(window.end);\n\n  for (\n    let startMinutes = windowStart;\n    startMinutes + meetingDurationMinutes <= windowEnd;\n    startMinutes += meetingDurationMinutes\n  ) {\n    const endMinutes =\n      startMinutes + meetingDurationMinutes;\n\n    const startUtc = localDateTimeToUtc(\n      date,\n      startMinutes,\n      timezone\n    );\n\n    const endUtc = localDateTimeToUtc(\n      date,\n      endMinutes,\n      timezone\n    );\n\n    // Evita ofrecer citas con menos de dos horas de antelación.\n    if (startUtc.getTime() < earliestAllowedTime) {\n      continue;\n    }\n\n    candidates.push({\n      json: {\n        toolCallId,\n        functionName,\n        date,\n        timePreference,\n        timezone,\n        meetingDurationMinutes,\n\n        slotIndex,\n        localStartTime: minutesToTime(startMinutes),\n        localEndTime: minutesToTime(endMinutes),\n\n        startTime: startUtc.toISOString(),\n        endTime: endUtc.toISOString(),\n\n        noCandidates: false,\n      },\n      pairedItem: {\n        item: 0,\n      },\n    });\n\n    slotIndex++;\n  }\n}\n\nif (candidates.length === 0) {\n  return [\n    {\n      json: {\n        ...data,\n        noCandidates: true,\n        reason:\n          \"No quedan horarios candidatos que cumplan el tiempo mínimo de antelación\",\n      },\n    },\n  ];\n}\n\nreturn candidates;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        -96
+      ],
+      "id": "eb1e433c-423f-4126-8f8f-776406f5c7fc",
+      "name": "Generar horarios candidatos"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "portfolio-check-calendar-availability",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -304,
+        0
+      ],
+      "id": "0cd32e26-bb99-44b5-a81a-756bef2ad51c",
+      "name": "Recibir consulta de disponibilidad"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nconst payload = input.body ?? input;\nconst message = payload.message ?? {};\n\nconst EXPECTED_FUNCTION_NAME = \"consultar_disponibilidad\";\nconst TIMEZONE = \"Europe/Madrid\";\nconst MEETING_DURATION_MINUTES = 30;\nconst MAX_ADVANCE_DAYS = 30;\n\n// --------------------------------------------------\n// 1. Localizar las llamadas de herramienta\n// --------------------------------------------------\n\nlet toolCalls = [];\n\nif (Array.isArray(message.toolCallList)) {\n  toolCalls = message.toolCallList;\n} else if (Array.isArray(message.toolCalls)) {\n  toolCalls = message.toolCalls;\n} else if (Array.isArray(message.toolWithToolCallList)) {\n  toolCalls = message.toolWithToolCallList.map(\n    (entry) => entry.toolCall ?? entry\n  );\n}\n\nconst toolCall = toolCalls[0] ?? null;\n\n// --------------------------------------------------\n// 2. Extraer argumentos\n// --------------------------------------------------\n\nlet args =\n  toolCall?.arguments ??\n  toolCall?.parameters ??\n  toolCall?.function?.arguments ??\n  {};\n\nif (typeof args === \"string\") {\n  try {\n    args = JSON.parse(args);\n  } catch {\n    args = {};\n  }\n}\n\nif (!args || typeof args !== \"object\" || Array.isArray(args)) {\n  args = {};\n}\n\n// --------------------------------------------------\n// 3. Normalizar los datos\n// --------------------------------------------------\n\nconst toolCallId = String(toolCall?.id ?? \"\").trim();\n\nconst functionName = String(\n  toolCall?.name ??\n  toolCall?.function?.name ??\n  \"\"\n).trim();\n\nconst date = String(\n  args.date ??\n  args.fecha ??\n  \"\"\n).trim();\n\nconst rawTimePreference = String(\n  args.timePreference ??\n  args.time_preference ??\n  args.franja ??\n  \"\"\n)\n  .trim()\n  .toLowerCase();\n\nconst allowedPreferences = [\n  \"morning\",\n  \"afternoon\",\n  \"any\",\n];\n\nconst timePreference = allowedPreferences.includes(rawTimePreference)\n  ? rawTimePreference\n  : rawTimePreference;\n\n// --------------------------------------------------\n// 4. Funciones para validar fechas\n// --------------------------------------------------\n\nconst parseCalendarDate = (value) => {\n  const match = /^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(value);\n\n  if (!match) {\n    return null;\n  }\n\n  const year = Number(match[1]);\n  const month = Number(match[2]);\n  const day = Number(match[3]);\n\n  const parsedDate = new Date(\n    Date.UTC(year, month - 1, day)\n  );\n\n  const isRealDate =\n    parsedDate.getUTCFullYear() === year &&\n    parsedDate.getUTCMonth() === month - 1 &&\n    parsedDate.getUTCDate() === day;\n\n  return isRealDate ? parsedDate : null;\n};\n\nconst getCurrentDateInTimezone = (timezone) => {\n  const parts = new Intl.DateTimeFormat(\"en-GB\", {\n    timeZone: timezone,\n    year: \"numeric\",\n    month: \"2-digit\",\n    day: \"2-digit\",\n  }).formatToParts(new Date());\n\n  const values = {};\n\n  for (const part of parts) {\n    if (part.type !== \"literal\") {\n      values[part.type] = part.value;\n    }\n  }\n\n  return `${values.year}-${values.month}-${values.day}`;\n};\n\n// --------------------------------------------------\n// 5. Validación\n// --------------------------------------------------\n\nconst errors = [];\n\nif (!toolCall) {\n  errors.push(\n    \"No se ha encontrado ninguna llamada de herramienta\"\n  );\n}\n\nif (!toolCallId) {\n  errors.push(\n    \"Falta el identificador de la llamada de herramienta\"\n  );\n}\n\nif (!functionName) {\n  errors.push(\n    \"Falta el nombre de la función\"\n  );\n} else if (functionName !== EXPECTED_FUNCTION_NAME) {\n  errors.push(\n    `La función recibida es \"${functionName}\", pero se esperaba \"${EXPECTED_FUNCTION_NAME}\"`\n  );\n}\n\nconst requestedDate = parseCalendarDate(date);\n\nif (!date) {\n  errors.push(\n    \"Falta la fecha solicitada\"\n  );\n} else if (!requestedDate) {\n  errors.push(\n    \"La fecha debe ser una fecha real con formato YYYY-MM-DD\"\n  );\n}\n\nif (!rawTimePreference) {\n  errors.push(\n    \"Falta la preferencia horaria\"\n  );\n} else if (!allowedPreferences.includes(rawTimePreference)) {\n  errors.push(\n    'La preferencia horaria debe ser \"morning\", \"afternoon\" o \"any\"'\n  );\n}\n\n// --------------------------------------------------\n// 6. Reglas de negocio de la fecha\n// --------------------------------------------------\n\nconst todayString = getCurrentDateInTimezone(TIMEZONE);\nconst todayDate = parseCalendarDate(todayString);\n\nlet daysInAdvance = null;\nlet isWeekend = false;\n\nif (requestedDate && todayDate) {\n  daysInAdvance = Math.round(\n    (requestedDate.getTime() - todayDate.getTime()) /\n      (24 * 60 * 60 * 1000)\n  );\n\n  const dayOfWeek = requestedDate.getUTCDay();\n  isWeekend = dayOfWeek === 0 || dayOfWeek === 6;\n\n  if (daysInAdvance < 0) {\n    errors.push(\n      \"No se puede consultar disponibilidad para una fecha pasada\"\n    );\n  }\n\n  if (daysInAdvance > MAX_ADVANCE_DAYS) {\n    errors.push(\n      `Solo se puede consultar disponibilidad con un máximo de ${MAX_ADVANCE_DAYS} días de antelación`\n    );\n  }\n\n  if (isWeekend) {\n    errors.push(\n      \"NovaWeb Studio no ofrece reuniones los sábados ni los domingos\"\n    );\n  }\n}\n\n// --------------------------------------------------\n// 7. Resultado normalizado\n// --------------------------------------------------\n\nreturn [\n  {\n    json: {\n      toolCallId,\n      functionName,\n      date,\n      timePreference,\n\n      timezone: TIMEZONE,\n      meetingDurationMinutes: MEETING_DURATION_MINUTES,\n\n      currentDate: todayString,\n      daysInAdvance,\n      isWeekend,\n\n      valid: errors.length === 0,\n      errors,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        0
+      ],
+      "id": "95a76f2c-ed4e-4187-89eb-0042d5917e0a",
+      "name": "Normalizar y validar consulta"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bf784450-a4e5-4403-b141-d6e3503c181b",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        320,
+        0
+      ],
+      "id": "def89bf3-9097-4d88-bf05-300dc363d33e",
+      "name": "¿Consulta válida?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "971482d0-72f6-48c6-be1c-8d02438d4e2f",
+              "leftValue": "={{ $json.noCandidates }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        736,
+        -96
+      ],
+      "id": "7bf7b730-c5ea-4364-9471-0b817182dd98",
+      "name": "¿Hay horarios que comprobar?"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1488,
+        -368
+      ],
+      "id": "a8934546-222c-41f7-8ba2-c49697a28602",
+      "name": "Responder disponibilidad a Vapi"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst toolCallId = String(\n  data.toolCallId ?? \"\"\n).trim();\n\nconst errors = Array.isArray(data.errors)\n  ? data.errors.filter(Boolean)\n  : [];\n\nconst toolResult = {\n  status: \"invalid_request\",\n  date: data.date || null,\n  timezone: data.timezone || \"Europe/Madrid\",\n  reasons:\n    errors.length > 0\n      ? errors\n      : [\"No se puede consultar la fecha solicitada\"],\n  instruction:\n    \"Explica brevemente el motivo al usuario y solicita otra fecha válida. No digas que se ha producido un error técnico.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(toolResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        480
+      ],
+      "id": "7b70c517-49ad-4ba5-8d6d-26dcc52f19aa",
+      "name": "Preparar respuesta de consulta inválida"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        784,
+        480
+      ],
+      "id": "6c475b6a-4293-456b-ae87-67949e340d3a",
+      "name": "Responder consulta inválida a Vapi"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst toolCallId = String(\n  data.toolCallId ?? \"\"\n).trim();\n\nconst toolResult = {\n  status: \"no_availability\",\n  date: data.date || null,\n  timezone: data.timezone || \"Europe/Madrid\",\n  reason:\n    data.reason ||\n    \"No quedan horarios disponibles que cumplan el tiempo mínimo de antelación\",\n  instruction:\n    \"Indica que ya no quedan horarios válidos para esa fecha y pide al usuario otra fecha o franja. No lo presentes como un error técnico.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(toolResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        192
+      ],
+      "id": "5b8304ee-1d99-406b-a18e-f8df7879694f",
+      "name": "Preparar respuesta sin horarios"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1168,
+        192
+      ],
+      "id": "b4b66bf5-e694-4f69-bfc3-e05233f8fea5",
+      "name": "Responder sin horarios a Vapi"
+    },
+    {
+      "parameters": {
+        "content": "## Real-Time Calendar Availability\n\nVoice-optimized availability workflow for a Spanish-speaking AI assistant.\n\nThe workflow receives a date and time preference from Vapi, validates the request, generates timezone-aware candidate slots, checks Google Calendar and returns a maximum of three available options.\n\nCore integrations:\n• Vapi\n• n8n\n• Google Calendar\n\nBusiness hours, appointment duration, timezone and scheduling rules can be adapted without redesigning the complete voice agent.",
+        "height": 336,
+        "width": 512
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -864,
+        -768
+      ],
+      "id": "b677ddfc-2da0-4ce8-83bd-b262af351f8d",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## 1. Availability Request Intake\n\nThe workflow receives a structured consultar_disponibilidad tool call from Vapi.\n\nIt extracts the tool call ID, requested date and time preference while supporting different Vapi payload formats.\n\nThe request is normalized into a consistent internal structure before any calendar operation is performed.",
+        "height": 304,
+        "width": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        -368
+      ],
+      "id": "83e6aeff-bc39-44ce-87fe-117815c4a5fb",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## 2. Business Rule Validation\n\nThe requested date is validated before generating appointment options.\n\nThe validation layer checks the YYYY-MM-DD format, prevents past dates, rejects weekends and applies the Europe/Madrid timezone.\n\nInvalid requests are stopped before reaching Google Calendar, reducing unnecessary API operations.\n",
+        "height": 304,
+        "width": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        96,
+        -368
+      ],
+      "id": "3921ed25-dd4e-41e2-ae55-5269b64a3fc7",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## 3. Invalid Request Recovery\n\nIf the date or request is invalid, the workflow returns a structured invalid_request response to Vapi.\n\nThe response includes the specific validation reasons and instructs the voice assistant to request another valid date.\n\nThe user receives a natural explanation instead of a generic technical error.\n",
+        "height": 304,
+        "width": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        512,
+        144
+      ],
+      "id": "6f752891-193d-4e5b-bfb5-fd21ad845b3a",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "## 4. Timezone-Aware Candidate Generation\n\nThe workflow generates 30-minute appointment candidates inside the configured business hours.\n\nThe requested morning, afternoon or flexible preference determines which scheduling window is used.\n\nEach local Europe/Madrid slot is converted into UTC before being checked against Google Calendar.",
+        "height": 304,
+        "width": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        512,
+        -448
+      ],
+      "id": "75db3def-ac6d-44a6-8a93-a866c26385a4",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "## 5. Empty Candidate Handling\n\nIf no valid candidate slots can be generated for the requested date or time preference, the workflow stops safely.\n\nA structured response is returned to Vapi so the assistant can request another date or scheduling preference.\n\nNo unnecessary Calendar request is performed on this branch.",
+        "height": 304,
+        "width": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        944,
+        -144
+      ],
+      "id": "3c9f1382-05fb-4bea-a19d-44d7048eab33",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "## 6. Live Google Calendar Availability\n\nEvery generated candidate is checked against the connected Google Calendar.\n\nThe workflow identifies which 30-minute periods are free without creating or modifying any event.\n\nThis separates availability discovery from appointment creation and keeps the consultation process read-only.",
+        "height": 352,
+        "width": 272
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        960,
+        -752
+      ],
+      "id": "0fe60236-40ee-4109-a0fe-60c75cf6f488",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "jsCode": "const calendarResults = $input.all();\n\nconst candidateSlots = $(\n  \"Generar horarios candidatos\"\n).all();\n\nif (calendarResults.length !== candidateSlots.length) {\n  throw new Error(\n    `El número de resultados de Calendar (${calendarResults.length}) no coincide con el número de horarios candidatos (${candidateSlots.length})`\n  );\n}\n\n// Relacionar cada resultado de Calendar con su horario original.\nconst checkedSlots = calendarResults.map(\n  (calendarItem, index) => {\n    const candidate = candidateSlots[index].json;\n\n    const available =\n      calendarItem.json.available === true ||\n      calendarItem.json.available === \"true\";\n\n    return {\n      ...candidate,\n      available,\n    };\n  }\n);\n\nconst firstSlot = checkedSlots[0];\n\nif (!firstSlot) {\n  throw new Error(\n    \"No se han recibido horarios para comprobar\"\n  );\n}\n\nconst {\n  toolCallId,\n  date,\n  timezone,\n  meetingDurationMinutes,\n} = firstSlot;\n\nconst availableSlots = checkedSlots.filter(\n  (slot) => slot.available\n);\n\n// Seleccionar un máximo de tres horarios distribuidos.\nconst selectDistributedSlots = (\n  slots,\n  maximum = 3\n) => {\n  if (slots.length <= maximum) {\n    return slots;\n  }\n\n  if (maximum === 1) {\n    return [slots[0]];\n  }\n\n  const selectedIndexes = new Set();\n\n  for (let index = 0; index < maximum; index++) {\n    const position = Math.round(\n      (index * (slots.length - 1)) /\n        (maximum - 1)\n    );\n\n    selectedIndexes.add(position);\n  }\n\n  return [...selectedIndexes].map(\n    (position) => slots[position]\n  );\n};\n\nconst selectedSlots = selectDistributedSlots(\n  availableSlots,\n  3\n);\n\n// Etiqueta pensada únicamente para la conversación.\nconst dateForFormatting = new Date(\n  `${date}T12:00:00.000Z`\n);\n\nconst dateLabel = new Intl.DateTimeFormat(\n  \"es-ES\",\n  {\n    weekday: \"long\",\n    day: \"numeric\",\n    month: \"long\",\n    year: \"numeric\",\n    timeZone: \"UTC\",\n  }\n).format(dateForFormatting);\n\n// Caso sin disponibilidad.\nif (selectedSlots.length === 0) {\n  const toolResult = {\n    status: \"no_availability\",\n\n    // Fecha para uso técnico.\n    date,\n\n    // Fecha para que Lucía la pronuncie.\n    dateLabel,\n\n    timezone,\n    availableSlots: [],\n    message:\n      \"No hay horarios disponibles para la fecha solicitada. Pide al usuario otra fecha o franja horaria.\",\n  };\n\n  return [\n    {\n      json: {\n        results: [\n          {\n            toolCallId,\n            result: JSON.stringify(toolResult),\n          },\n        ],\n      },\n    },\n  ];\n}\n\n// Caso con disponibilidad.\nconst slotsForVapi = selectedSlots.map(\n  (slot) => ({\n    start: slot.localStartTime,\n    end: slot.localEndTime,\n    startUtc: slot.startTime,\n    endUtc: slot.endTime,\n  })\n);\n\nconst toolResult = {\n  status: \"available\",\n\n  // Siempre mantiene YYYY-MM-DD.\n  date,\n\n  // Solo se utiliza para hablar con el usuario.\n  dateLabel,\n\n  timezone,\n  durationMinutes: meetingDurationMinutes,\n  availableSlots: slotsForVapi,\n  instruction:\n    \"Ofrece estos horarios al usuario y espera a que elija uno. No reserves todavía.\",\n};\n\nreturn [\n  {\n    json: {\n      results: [\n        {\n          toolCallId,\n          result: JSON.stringify(toolResult),\n        },\n      ],\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        -368
+      ],
+      "id": "62ccc5d9-51d1-43d5-8ea4-593a8cc165e4",
+      "name": "Seleccionar opciones disponibles"
+    },
+    {
+      "parameters": {
+        "content": "## 7. Voice-Optimized Option Selection\n\nAvailable slots are filtered and a maximum of three options are selected across the requested time window.\n\nReturning a limited and distributed set of options creates a clearer voice conversation than reading every available slot.\n\nIf no slot is free, Vapi receives a no_availability response and asks the user for another date or preference.",
+        "height": 352,
+        "width": 352
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        -752
+      ],
+      "id": "21d2fbda-143f-4a5c-b088-10e14d1654ba",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "## 8. Structured Vapi Response\n\nThe final response preserves the original Vapi tool call ID and returns the date, timezone, appointment duration and available time slots.\n\nVapi can read these options naturally, wait for the user to choose one and only then call the separate reservar_cita workflow.\n\nAvailability is never treated as a confirmed booking.",
+        "height": 256,
+        "width": 368
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1648,
+        -352
+      ],
+      "id": "89a515da-11cf-4d22-8924-717519f03956",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_CALENDAR_ID",
+          "mode": "id"
+        },
+        "timeMin": "={{ $json.startTime }}",
+        "timeMax": "={{ $json.endTime }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1024,
+        -368
+      ],
+      "id": "efc5983e-5c28-4651-9118-5fde8c78cdfb",
+      "name": "Comprobar disponibilidad Calendar"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Generar horarios candidatos": {
+      "main": [
+        [
+          {
+            "node": "¿Hay horarios que comprobar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recibir consulta de disponibilidad": {
+      "main": [
+        [
+          {
+            "node": "Normalizar y validar consulta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalizar y validar consulta": {
+      "main": [
+        [
+          {
+            "node": "¿Consulta válida?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Consulta válida?": {
+      "main": [
+        [
+          {
+            "node": "Generar horarios candidatos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar respuesta de consulta inválida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Hay horarios que comprobar?": {
+      "main": [
+        [
+          {
+            "node": "Comprobar disponibilidad Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar respuesta sin horarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar respuesta de consulta inválida": {
+      "main": [
+        [
+          {
+            "node": "Responder consulta inválida a Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar respuesta sin horarios": {
+      "main": [
+        [
+          {
+            "node": "Responder sin horarios a Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seleccionar opciones disponibles": {
+      "main": [
+        [
+          {
+            "node": "Responder disponibilidad a Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comprobar disponibilidad Calendar": {
+      "main": [
+        [
+          {
+            "node": "Seleccionar opciones disponibles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "tags": []
+}
